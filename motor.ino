@@ -6,70 +6,135 @@
 #include <Wire.h>
 #include <Adafruit_MotorShield.h>
 #include "utility/Adafruit_MS_PWMServoDriver.h"
+#include "pid.h"
 
 const int IR_SENSOR_LEFT = A0;
 const int IR_SENSOR_RIGHT = A1;
-
-const int SENSOR_THRESHOLD = 40;
-
-uint8_t motorSpeed = 150;
-byte sensorReadings = B00;
 
 Adafruit_MotorShield AFMS = Adafruit_MotorShield();
 Adafruit_DCMotor *leftMotor = AFMS.getMotor(1);
 Adafruit_DCMotor *rightMotor = AFMS.getMotor(2);
 
-byte readFromSensors() {
-  // Serial.println(analogRead(IR_SENSOR_LEFT));
-  // Serial.println(analogRead(IR_SENSOR_RIGHT));
-  byte leftReading = analogRead(IR_SENSOR_LEFT) > SENSOR_THRESHOLD;
-  byte rightReading = analogRead(IR_SENSOR_RIGHT) > SENSOR_THRESHOLD;
-  return leftReading << 1 | rightReading;
-}
+int initialSpeed = 2;
 
-void driveForward() {
-  leftMotor->run(FORWARD);
-  rightMotor->run(FORWARD);
-}
+double iMax = 10;
+double iMin = -10;
 
-void turnLeft() {
-  leftMotor->run(RELEASE);
-  rightMotor->run(FORWARD);
-}
+double Kp = 10;
+double Ki = 0;
+double Kd = 0;
 
-void turnRight() {
-  leftMotor->run(FORWARD);
-  rightMotor->run(RELEASE);
-}
+int leftSetPoint = 25;
+int rightSetPoint = 24; 
 
-void stop() {
-  leftMotor->run(RELEASE);
-  rightMotor->run(RELEASE);
+PIDState leftPID = {
+  initialSpeed,
+  0,
+  Kp + 1,
+  Ki,
+  Kd
+};
+
+PIDState rightPID = {
+  initialSpeed,
+  0,
+  Kp,
+  Ki,
+  Kd
+};
+
+double updatePID(PIDState *pid, int error, int position) {
+  double pTerm = pid->pGain * error;
+
+  pid->integrator += error;
+
+  double iTerm = pid->iGain * pid->integrator;
+
+  if (iTerm > iMax) iTerm = iMax;
+  if (iTerm < iMin) iTerm = iMin;
+
+  double dTerm = pid->dGain * (pid->position - position);
+
+  pid->position = position;
+
+  return pTerm + iTerm + dTerm;
 }
 
 void setup() {
-  Serial.begin(9600);
+  Serial.begin(115200);
   AFMS.begin();
-  leftMotor->setSpeed(motorSpeed);
-  rightMotor->setSpeed(motorSpeed);
+
+  leftMotor->setSpeed(initialSpeed);
+  rightMotor->setSpeed(initialSpeed);
+
+  leftMotor->run(FORWARD);
+  rightMotor->run(FORWARD);
+}
+
+void parseCommand(String command) {
+  PIDState *pid;
+
+  switch (command[0]) {
+    case 'L':
+      pid = &leftPID;
+      break;
+
+    case 'R':
+      pid = &rightPID;
+      break;
+
+    default:
+      return;
+  }
+
+  String newValString = String(command);
+  newValString.remove(0, 2);
+  int newVal = newValString.toInt();
+
+  switch (command[1]) {
+    case 'P':
+      pid->pGain = newVal;
+      break;
+
+    case 'I':
+      pid->iGain = newVal;
+      break;
+
+    case 'D':
+      pid->dGain = newVal;
+      break;
+
+    default:
+      break;
+  }
+}
+
+void writeCSVToSerial(int leftPosition, int rightPosition, double leftSpeed, double rightSpeed) {
+  Serial.print(leftPosition);
+  Serial.print(", ");
+  Serial.print(rightPosition);
+  Serial.print(", ");
+  Serial.print(leftSpeed);
+  Serial.print(", ");
+  Serial.println(rightSpeed);
 }
 
 void loop() {
-  byte sensorReading = readFromSensors();
-  Serial.println(String(sensorReading, BIN));
-  switch (sensorReading) {
-    case B11:
-      driveForward();
-      break;
-    case B10:
-      turnRight();
-      break;
-    case B01:
-      turnLeft();
-      break;
-    default:
-      stop();
-      break;
+  if (Serial.available() > 0) {
+    parseCommand(Serial.readStringUntil('\n'));
   }
-  delay(1000);
+
+  int leftPosition = analogRead(IR_SENSOR_LEFT);
+  int rightPosition = analogRead(IR_SENSOR_RIGHT);
+
+  int leftError = leftPosition - leftSetPoint;
+  int rightError = rightPosition - rightSetPoint;
+
+  double leftSpeed = updatePID(&leftPID, rightError, rightPosition) - initialSpeed;
+  double rightSpeed = updatePID(&rightPID, leftError, leftPosition) - initialSpeed;
+
+  leftMotor->setSpeed(leftSpeed);
+  rightMotor->setSpeed(rightSpeed);
+
+  writeCSVToSerial(leftPosition, rightPosition, leftSpeed, rightSpeed);
 }
